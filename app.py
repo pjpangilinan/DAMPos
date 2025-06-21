@@ -114,9 +114,11 @@ BLOCK_SIZE = 1 * 1024 * 1024  # 1 MB per block
 # ------------------------ Home Page ------------------------ #
 def home_page():
     username = st.session_state.get("username", "me")
-    now = datetime.now()
-    date_str = now.strftime("%B %d, %Y")
-    time_str = now.strftime("%I:%M %p")
+
+    # Get local time (GMT+8 - Manila)
+    local_time = datetime.now(ZoneInfo("Asia/Manila"))
+    date_str = local_time.strftime("%B %d, %Y")
+    time_str = local_time.strftime("%I:%M %p")
 
     def encode_image(image_path):
         with open(image_path, "rb") as img_file:
@@ -955,11 +957,45 @@ def settings_page():
         st.session_state.page = "home"
         st.rerun()
 
-    st.markdown("## ⚙️ Settings")
+    st.markdown("### 🖥️ System Information")
+    col1, col2 = st.columns(2)
+
+    if "disk" not in st.session_state:
+        user_data = get_user(st.session_state.get("username", ""))
+        if user_data and len(user_data) > 3 and user_data[3]:
+            try:
+                st.session_state.disk = json.loads(user_data[3])
+            except:
+                st.session_state.disk = [None] * DISK_SIZE
+        else:
+            st.session_state.disk = [None] * DISK_SIZE
+
+    with col1:
+        st.markdown(f"**Username:** `{st.session_state.get('username', 'N/A')}`")
+
+        # Toggleable password
+        if "show_password" not in st.session_state:
+            st.session_state.show_password = False
+
+        st.session_state.show_password = st.toggle("Show Password", key="toggle_pw")
+        pw_display = st.session_state.get("plain_password", "******") if st.session_state.show_password else "******"
+        st.markdown(f"**Password:** `{pw_display}`")
+
+    with col2:
+        st.markdown(f"**Streamlit Version:** `{st.__version__}`")
+
+        # Memory usage
+        if "disk" in st.session_state:
+            used_blocks = sum(1 for b in st.session_state.disk if b is not None)
+            total_blocks = len(st.session_state.disk)
+            used_mb = used_blocks * (BLOCK_SIZE / (1024 * 1024))
+            total_mb = total_blocks * (BLOCK_SIZE / (1024 * 1024))
+            st.markdown(f"**Memory Usage:** `{used_mb:.2f} / {total_mb:.0f} MB`")
+        else:
+            st.markdown("**Memory Usage:** `N/A`")
+
     st.markdown("---")
 
-    # Logout section
-    st.markdown("### 🔒 Account")
     if st.button("🚪 Logout", use_container_width=True):
         for key in list(st.session_state.keys()):
             if key != "loaded":
@@ -983,7 +1019,6 @@ def login_ui():
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
         """
     ):
-        
         def get_base64_image(path):
             with open(path, "rb") as f:
                 data = f.read()
@@ -997,46 +1032,77 @@ def login_ui():
             </div>
         """, unsafe_allow_html=True)
 
-        # Mode switch buttons
-        col1, col2 = st.columns(2)
+        # Navigation buttons
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("🔐 Login", use_container_width=True):
                 st.session_state.auth_mode = "Login"
         with col2:
             if st.button("📝 Sign Up", use_container_width=True):
                 st.session_state.auth_mode = "Sign Up"
+        with col3:
+            if st.button("🔄 Forgot Password", use_container_width=True):
+                st.session_state.auth_mode = "Reset"
 
-        # Form
-        with st.form("auth_form", clear_on_submit=False):
-            username = st.text_input("Username", placeholder="Enter your username")
-            password = st.text_input("Password", type="password", placeholder="Enter your password")
-            
-            button_text = "Create Account" if st.session_state.auth_mode == "Sign Up" else "Login"
-            submitted = st.form_submit_button(button_text, use_container_width=True)
+        # AUTH FORMS
+        if st.session_state.auth_mode in ["Login", "Sign Up"]:
+            with st.form("auth_form", clear_on_submit=False):
+                username = st.text_input("Username", placeholder="Enter your username")
+                password = st.text_input("Password", type="password", placeholder="Enter your password")
 
-            if submitted:
-                if st.session_state.auth_mode == "Sign Up":
-                    if get_user(username):
-                        st.warning("⚠️ Username already exists.")
-                    elif not is_strong_password(password):
-                        st.error("Password must be at least 8 characters with uppercase, lowercase, number, and symbol.")
+                button_text = "Create Account" if st.session_state.auth_mode == "Sign Up" else "Login"
+                submitted = st.form_submit_button(button_text, use_container_width=True)
+
+                if submitted:
+                    if st.session_state.auth_mode == "Sign Up":
+                        if get_user(username):
+                            st.warning("⚠️ Username already exists.")
+                        elif not is_strong_password(password):
+                            st.error("Password must be at least 8 characters with uppercase, lowercase, number, and symbol.")
+                        else:
+                            add_user(username, password)
+                            st.success("✅ Account created successfully!")
+                            st.session_state.auth_mode = "Login"
                     else:
-                        add_user(username, password)
-                        st.success("✅ Account created successfully!")
-                        st.session_state.auth_mode = "Login"
-                else:
+                        user = get_user(username)
+                        if not user:
+                            st.error("❌ Username not found.")
+                        elif not check_password(password, user[1]):
+                            st.error("🔐 Incorrect password.")
+                        else:
+                            st.success(f"🎉 Welcome, {username}!")
+                            time.sleep(0.5)
+                            st.session_state.authenticated = True
+                            st.session_state.username = username
+                            st.session_state.page = "home"
+                            st.session_state.plain_password = password
+                            st.rerun()
+
+        elif st.session_state.auth_mode == "Reset":
+            with st.form("reset_form", clear_on_submit=False):
+                st.markdown("### 🔄 Reset Password")
+                username = st.text_input("Username for Reset")
+                new_password = st.text_input("New Password", type="password")
+                confirm_password = st.text_input("Confirm Password", type="password")
+                reset_submit = st.form_submit_button("Reset Password", use_container_width=True)
+
+                if reset_submit:
                     user = get_user(username)
                     if not user:
                         st.error("❌ Username not found.")
-                    elif not check_password(password, user[1]):
-                        st.error("🔐 Incorrect password.")
+                    elif new_password != confirm_password:
+                        st.error("❌ Passwords do not match.")
+                    elif not is_strong_password(new_password):
+                        st.warning("⚠️ Password must include uppercase, lowercase, number, symbol, and be 8+ characters.")
                     else:
-                        st.success(f"🎉 Welcome, {username}!")
-                        time.sleep(0.5)
-                        st.session_state.authenticated = True
-                        st.session_state.username = username
-                        st.session_state.page = "home"
-                        st.rerun()
+                        conn = sqlite3.connect("users.db")
+                        c = conn.cursor()
+                        new_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+                        c.execute("UPDATE users SET password_hash = ? WHERE username = ?", (new_hash, username))
+                        conn.commit()
+                        conn.close()
+                        st.success("✅ Password updated! You can now log in.")
+                        st.session_state.auth_mode = "Login"
 
 if __name__ == "__main__":
     st.set_page_config(page_title="DAMPos", page_icon="icon.png", initial_sidebar_state="collapsed")
