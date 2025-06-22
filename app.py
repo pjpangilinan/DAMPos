@@ -950,10 +950,10 @@ def settings_page():
     col1, col2 = st.columns(2)
 
     if "disk" not in st.session_state:
-        user_data = get_user(st.session_state.get("username", ""))
-        if user_data and len(user_data) > 3 and user_data[3]:
+        user_data = get_user(st.session_state.username) if "username" in st.session_state else None
+        if user_data and "disk_json" in user_data and user_data["disk_json"]:
             try:
-                st.session_state.disk = json.loads(user_data[3])
+                st.session_state.disk = json.loads(user_data["disk_json"])
             except:
                 st.session_state.disk = [None] * DISK_SIZE
         else:
