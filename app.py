@@ -3,6 +3,7 @@ from streamlit_lottie import st_lottie
 from streamlit_extras.stylable_container import stylable_container
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from collections import deque
 import requests
 import random
 import uuid
@@ -14,6 +15,46 @@ import re
 import time
 import json
 import base64
+
+# ------------------------ Process Management ------------------------ #
+class Process:
+    def __init__(self, id, name, arrival_time, burst_time, priority=None, addition_order=0): 
+        self.id = id
+        self.name = name
+        self.arrival_time = arrival_time
+        self.burst_time = burst_time
+        self.priority = priority
+        self.addition_order = addition_order 
+
+        self.remaining_time = burst_time
+        self.state = "Waiting" # "Waiting", "Running", "Finished"
+        self.start_execution_time = None # The very first time it gets CPU
+        self.last_run_time = None # The last tick it executed
+        self.completion_time = None
+
+    def calculate_metrics(self):
+        # Only calculate for finished processes
+        if self.state != "Finished":
+            return {}
+
+        turnaround_time = self.completion_time - self.arrival_time if self.completion_time is not None else None
+        
+        # Waiting time = Turnaround Time - Burst Time
+        waiting_time = turnaround_time - self.burst_time if turnaround_time is not None else None
+        
+        response_time = self.start_execution_time - self.arrival_time if self.start_execution_time is not None else None
+        
+        return {
+            "PID": self.name,
+            "Arrival Time (s)": self.arrival_time,
+            "Burst Time": self.burst_time,
+            "Priority": self.priority if self.priority is not None else "-",
+            "Start Time (s)": self.start_execution_time,
+            "Completion Time (s)": self.completion_time,
+            "Turnaround Time (s)": turnaround_time,
+            "Waiting Time (s)": waiting_time,
+            "Response Time (s)": response_time
+        }
 
 # ------------------------ DB Functions ------------------------ #
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
@@ -545,243 +586,353 @@ def tm_page():
         st.session_state.page = "home"
         st.rerun()
 
-    if "tasks" not in st.session_state:
-        st.session_state.tasks = []
+    # --- Session State Initialization ---
+    if "processes" not in st.session_state:
+        st.session_state.processes = []
     if "running" not in st.session_state:
         st.session_state.running = False
-    if "current_task_id" not in st.session_state:
-        st.session_state.current_task_id = None
-    if "last_update" not in st.session_state:
-        st.session_state.last_update = time.time()
+    if "current_process_id" not in st.session_state:
+        st.session_state.current_process_id = None
+    if "last_tick_time" not in st.session_state:
+        st.session_state.last_tick_time = time.time()
     if "algorithm" not in st.session_state:
         st.session_state.algorithm = "FCFS"
     if "time_quantum" not in st.session_state:
         st.session_state.time_quantum = 2
-    if "rr_counter" not in st.session_state:
-        st.session_state.rr_counter = 0
-    if "gantt_log" not in st.session_state:
-        st.session_state.gantt_log = []
-    if "start_reference_time" not in st.session_state:
-        st.session_state.start_reference_time = None
+    if "rr_quantum_counter" not in st.session_state:
+        st.session_state.rr_quantum_counter = 0
+    if "gantt_raw_log" not in st.session_state: # Stores (Task Name, Start Time, End Time)
+        st.session_state.gantt_raw_log = []
     if "sim_time" not in st.session_state:
         st.session_state.sim_time = 0
-    if "pending_next_task_id" not in st.session_state:
-        st.session_state.pending_next_task_id = None
-    if "defer_next_tick" not in st.session_state:
-        st.session_state.defer_next_tick = False
     if "cpu_active_time" not in st.session_state:
         st.session_state.cpu_active_time = 0
+    if "ready_queue" not in st.session_state:
+        st.session_state.ready_queue = deque()
+    if "un_arrived_processes" not in st.session_state:
+        st.session_state.un_arrived_processes = deque()
+    if "completed_processes" not in st.session_state:
+        st.session_state.completed_processes = []
+    if "prev_executed_pid" not in st.session_state: # For Gantt chart consolidation
+        st.session_state.prev_executed_pid = None
 
-    # --- Layout Split ---
-    left, right = st.columns(2)
 
-    # --- Task Scheduler Section ---
-    with left:
+    # --- Task Scheduler Section (now entirely in sidebar) ---
+    with st.sidebar: # This wraps the entire previous 'left' column content
         st.markdown("<h2 style='text-align: center;'>Task Scheduler</h3>", unsafe_allow_html=True)
         st.session_state.algorithm = st.selectbox("Scheduling Algorithm", ["FCFS", "SJF", "Priority", "Round Robin"])
         if st.session_state.algorithm == "Round Robin":
-            st.session_state.time_quantum = st.number_input("Time Quantum", min_value=1, value=2)
+            st.session_state.time_quantum = st.number_input("Time Quantum", min_value=1, value=2, key="rr_quantum_input")
 
         with st.form("add_task_form"):
-            name = st.text_input("Task Name", f"Task {len(st.session_state.tasks)+1}")
+            name = st.text_input("Task Name", f"Task {len(st.session_state.processes)+1}")
+            arrival = st.number_input("Arrival Time", min_value=0, value=0)
             burst = st.number_input("Burst Time", min_value=1, value=5)
             priority = st.number_input("Priority (lower = higher)", min_value=1, value=1)
+
             submitted = st.form_submit_button("➕ Add Task", use_container_width=True)
             if submitted:
-                now = st.session_state.sim_time
-                st.session_state.tasks.append({
-                    "id": str(uuid.uuid4()),
-                    "name": name,
-                    "burst": burst,
-                    "remaining": burst,
-                    "priority": priority,
-                    "state": "Waiting",
-                    "start_time": None,
-                    "end_time": None,
-                    "arrival_time": now,
-                    "memory": random.randint(5, 25)
-                })
+                new_process = Process(
+                    id=str(uuid.uuid4()),
+                    name=name,
+                    arrival_time=arrival,
+                    burst_time=burst,
+                    priority=priority,
+                    addition_order=len(st.session_state.processes)
+                )
+                st.session_state.processes.append(new_process)
 
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("▶️ Start", use_container_width=True):
-                if st.session_state.tasks:
+            if st.button("Start", use_container_width=True):
+                if st.session_state.processes:
                     st.session_state.running = True
-                    st.session_state.rr_counter = 0
                     st.session_state.sim_time = 0
                     st.session_state.cpu_active_time = 0
-                    st.session_state.defer_next_tick = False
-                    st.session_state.start_reference_time = min(t["arrival_time"] for t in st.session_state.tasks)
+                    st.session_state.rr_quantum_counter = 0
+                    st.session_state.current_process_id = None
+                    st.session_state.gantt_raw_log = []
+                    st.session_state.ready_queue = deque()
+                    st.session_state.completed_processes = []
+                    st.session_state.prev_executed_pid = None
 
-                    if st.session_state.algorithm == "SJF":
-                        st.session_state.tasks.sort(key=lambda x: x["burst"])
-                    elif st.session_state.algorithm == "Priority":
-                        st.session_state.tasks.sort(key=lambda x: x["priority"])
-                    elif st.session_state.algorithm == "FCFS":
-                        st.session_state.tasks.sort(key=lambda x: x["arrival_time"])
+                    # Reset all processes to their initial state for a new run
+                    for p in st.session_state.processes:
+                        p.remaining_time = p.burst_time
+                        p.state = "Waiting"
+                        p.start_execution_time = None
+                        p.last_run_time = None
+                        p.completion_time = None
+                    
+                    # Initialize un_arrived_processes deque for use in scheduling loop
+                    # Sort by arrival time (primary) then addition order (secondary for tie-breaking)
+                    st.session_state.un_arrived_processes = deque(sorted(st.session_state.processes, key=lambda x: (x.arrival_time, x.addition_order)))
 
-                    for t in st.session_state.tasks:
-                        if t["state"] == "Waiting":
-                            t["state"] = "Running"
-                            t["start_time"] = st.session_state.sim_time
-                            st.session_state.current_task_id = t["id"]
-                            break
                     st.rerun()
 
         with c2:
-            if st.button("🔄 Reset", use_container_width=True):
+            if st.button("Reset", use_container_width=True):
                 for key in [
-                    "tasks", "running", "current_task_id", "last_update", "algorithm",
-                    "time_quantum", "rr_counter", "gantt_log", "start_reference_time",
-                    "sim_time", "pending_next_task_id", "defer_next_tick", "cpu_active_time"
+                    "processes", "running", "current_process_id", "last_tick_time", "algorithm",
+                    "time_quantum", "rr_quantum_counter", "gantt_raw_log", "sim_time",
+                    "cpu_active_time", "ready_queue", "un_arrived_processes", "completed_processes",
+                    "prev_executed_pid"
                 ]:
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()
 
-    # --- Task Manager Section ---
-    with right:
-        st.markdown("<h2 style='text-align: center;'>Task Manager</h3>", unsafe_allow_html=True)
-        for t in st.session_state.tasks.copy():
-            col1, col2 = st.columns([6, 1])
-            with col1:
-                st.markdown(
-                    f"**{t['name']}** — Status: `{t['state']}` — ⏳ Remaining: `{t['remaining']}s` — "
-                    f"💥 Burst: `{t['burst']}s` — 🔹 Priority: `{t['priority']}`"
-                )
-                st.progress((t['burst'] - t['remaining']) / t['burst'] if t['burst'] > 0 else 1.0)
-            with col2:
-                if st.button("❌ Kill", key=f"kill_{t['id']}"):
-                    if t["id"] == st.session_state.current_task_id:
-                        st.session_state.running = False
-                        st.session_state.current_task_id = None
-                    st.session_state.tasks.remove(t)
-                    st.rerun()
+    # --- Main Content Area ---
+    st.markdown("<h2 style='text-align: center;'>Task Manager</h2>", unsafe_allow_html=True)
 
-    # --- CPU Execution Logic ---
-    if st.session_state.running:
-        if st.session_state.defer_next_tick:
-            st.session_state.defer_next_tick = False
-            st.session_state.sim_time += 1
-            st.rerun()
+    st.markdown("""
+        <div style='display: flex; justify-content: center; margin-top: -1rem; margin-left: -1.5rem;'>
+            <p style='font-size: 0.9em; color: gray;'>Task Scheduler is in the sidebar.</p>
+        </div>
+    """, unsafe_allow_html=True)
 
-        if st.session_state.pending_next_task_id:
-            pending_task = next(t for t in st.session_state.tasks if t["id"] == st.session_state.pending_next_task_id)
-            if pending_task["state"] == "Waiting" and pending_task["arrival_time"] <= st.session_state.sim_time:
-                pending_task["state"] = "Running"
-                pending_task["start_time"] = st.session_state.sim_time
-                st.session_state.current_task_id = pending_task["id"]
-            st.session_state.pending_next_task_id = None
+    for p in st.session_state.processes:
+        col1, col2 = st.columns([6, 1])
+        with col1:
+            st.markdown(
+                f"**{p.name}** — Status: `{p.state}` — ⏳ Remaining: `{p.remaining_time}s` — "
+                f"💥 Burst: `{p.burst_time}s` — 🔹 Priority: `{p.priority}` — 🕰️ Arrival: `{p.arrival_time}s`"
+            )
+        with col2:
+            if st.button("❌ Kill", key=f"kill_{p.id}"):
+                # Mark as finished/killed
+                if p.state != "Finished":
+                    p.state = "Finished"
+                    p.remaining_time = 0
+                    p.completion_time = st.session_state.sim_time # Killed at current sim_time
+                    
+                    # Log the current segment if it was running
+                    if p.id == st.session_state.current_process_id and p.start_execution_time is not None and p.last_run_time is not None:
+                        # Adjust the last gantt segment to end at current sim_time
+                        if st.session_state.gantt_raw_log and st.session_state.gantt_raw_log[-1][0] == p.name:
+                            st.session_state.gantt_raw_log[-1] = (p.name, st.session_state.gantt_raw_log[-1][1], st.session_state.sim_time)
 
-        current_task = next((t for t in st.session_state.tasks if t["id"] == st.session_state.current_task_id), None)
 
-        if current_task and current_task["state"] == "Running":
-            current_task["remaining"] -= 1
-            st.session_state.rr_counter += 1
+                    if p not in st.session_state.completed_processes:
+                        st.session_state.completed_processes.append(p)
+                
+                # Remove from other queues if still present
+                st.session_state.ready_queue = deque([task for task in st.session_state.ready_queue if task.id != p.id])
+                st.session_state.un_arrived_processes = deque([task for task in st.session_state.un_arrived_processes if task.id != p.id])
+
+                if p.id == st.session_state.current_process_id:
+                    st.session_state.current_process_id = None # Clear current running process
+                    st.session_state.rr_quantum_counter = 0 # Reset for next
+                    st.session_state.prev_executed_pid = None # Break Gantt consolidation
+
+                # If all tasks are now finished (or killed) stop the simulation
+                if len(st.session_state.completed_processes) == len(st.session_state.processes):
+                    st.session_state.running = False
+                
+                st.rerun()
+        st.progress((p.burst_time - p.remaining_time) / p.burst_time if p.burst_time > 0 else 1.0)
+
+    # --- CPU Execution Logic (scheduler_tick function) ---
+    def scheduler_tick():
+        # 1. Add newly arrived processes to ready queue
+        while st.session_state.un_arrived_processes and \
+            st.session_state.un_arrived_processes[0].arrival_time <= st.session_state.sim_time:
+            p = st.session_state.un_arrived_processes.popleft()
+            if p.state != "Finished": # Only add if not already killed
+                st.session_state.ready_queue.append(p)
+
+        # 2. Determine current running process and potential next process
+        current_process = next((p for p in st.session_state.processes if p.id == st.session_state.current_process_id), None)
+        
+        next_process_to_run = None
+
+        # Handle process selection based on algorithm
+        if st.session_state.algorithm == "FCFS":
+            # FCFS: Sort by arrival, then by addition_order (for tie-breaking)
+            st.session_state.ready_queue = deque(sorted(st.session_state.ready_queue, key=lambda x: (x.arrival_time, x.addition_order)))
+            if st.session_state.ready_queue:
+                next_process_to_run = st.session_state.ready_queue[0] # FCFS picks from front
+            
+            # In FCFS, once a process starts, it runs to completion (non-preemptive)
+            if current_process and current_process.state == "Running" and current_process.remaining_time > 0:
+                next_process_to_run = current_process # Continue running current process
+
+
+        elif st.session_state.algorithm == "SJF": # Non-Preemptive SJF
+            # Consider processes that are "Waiting" and have arrived
+            available_processes_in_queue = [p for p in st.session_state.ready_queue if p.state == "Waiting"]
+            # Sort by burst_time, then arrival_time, then addition_order for tie-breaking
+            available_processes_in_queue.sort(key=lambda x: (x.burst_time, x.arrival_time, x.addition_order))
+            
+            if available_processes_in_queue:
+                next_process_to_run = available_processes_in_queue[0]
+            
+            # If a process is currently running and hasn't finished, it continues (non-preemptive)
+            if current_process and current_process.state == "Running" and current_process.remaining_time > 0:
+                next_process_to_run = current_process
+
+
+        elif st.session_state.algorithm == "Priority": # Non-Preemptive Priority
+            available_processes_in_queue = [p for p in st.session_state.ready_queue if p.state == "Waiting"]
+            # Sort by priority (lower number = higher priority), then arrival_time, then addition_order
+            available_processes_in_queue.sort(key=lambda x: (x.priority, x.arrival_time, x.addition_order))
+            
+            if available_processes_in_queue:
+                next_process_to_run = available_processes_in_queue[0]
+
+            # If a process is currently running and hasn't finished, it continues (non-preemptive)
+            if current_process and current_process.state == "Running" and current_process.remaining_time > 0:
+                next_process_to_run = current_process
+
+
+        elif st.session_state.algorithm == "Round Robin":
+            # Round Robin logic. `ready_queue` is managed as a true circular queue.
+            # If current_process is running and not finished and its quantum hasn't expired, it stays.
+            if current_process and current_process.state == "Running" and current_process.remaining_time > 0:
+                next_process_to_run = current_process
+            else: # Quantum expired, or current_process finished, or nothing was running
+                if st.session_state.ready_queue:
+                    next_process_to_run = st.session_state.ready_queue[0]
+
+
+        # 3. Handle state transitions (running a new process, or CPU idle)
+        if next_process_to_run and next_process_to_run.state != "Finished":
+            if current_process is None or current_process.id != next_process_to_run.id:
+                # Context switch: a new process is chosen
+                if current_process and current_process.state == "Running": # Preempt the old process
+                    current_process.state = "Waiting"
+                    # Log the segment for the preempted task up to current_time
+                    # This should be implicitly handled by `gantt_raw_log` consolidation logic
+
+                next_process_to_run.state = "Running"
+                if next_process_to_run.start_execution_time is None:
+                    next_process_to_run.start_execution_time = st.session_state.sim_time
+                
+                st.session_state.current_process_id = next_process_to_run.id
+                st.session_state.rr_quantum_counter = 0 # Reset quantum for new process
+                st.session_state.prev_executed_pid = None # Break Gantt consolidation
+
+                # If the process was picked from the front of the ready queue (FCFS, SJF, Priority)
+                # or for RR when it's genuinely the next in the circular queue
+                if next_process_to_run in st.session_state.ready_queue:
+                    if st.session_state.algorithm != "Round Robin" or (st.session_state.algorithm == "Round Robin" and next_process_to_run == st.session_state.ready_queue[0]):
+                        if st.session_state.ready_queue:
+                            try:
+                                st.session_state.ready_queue.remove(next_process_to_run)
+                            except ValueError:
+                                pass
+        else: # No process selected to run (CPU idle or all processes finished)
+            st.session_state.current_process_id = None
+            st.session_state.prev_executed_pid = None # Break Gantt consolidation
+            
+            remaining_tasks = [p for p in st.session_state.processes if p.state != "Finished"]
+            
+            if not remaining_tasks: # All processes are done
+                st.session_state.running = False
+                return
+            
+            # If there are tasks but none are ready (CPU idle until next arrival)
+            if not st.session_state.ready_queue and st.session_state.un_arrived_processes:
+                st.session_state.sim_time = st.session_state.un_arrived_processes[0].arrival_time - 1 
+                st.session_state.cpu_active_time = st.session_state.sim_time 
+
+        # 4. Execute current process for 1 tick (if one is selected)
+        current_process = next((p for p in st.session_state.processes if p.id == st.session_state.current_process_id), None)
+        if current_process and current_process.state == "Running":
+            current_process.remaining_time -= 1
             st.session_state.cpu_active_time += 1
+            current_process.last_run_time = st.session_state.sim_time
 
-            if current_task["remaining"] <= 0:
-                current_task["state"] = "Finished"
-                current_task["end_time"] = st.session_state.sim_time + 1
-                st.session_state.gantt_log.append({
-                    "Task": current_task["name"],
-                    "Start": current_task["start_time"],
-                    "Finish": current_task["end_time"]
-                })
-                st.session_state.rr_counter = 0
-                st.session_state.current_task_id = None
-
-                next_task = None
-                if st.session_state.algorithm in ["SJF", "Priority"]:
-                    queue = [t for t in st.session_state.tasks if t["state"] == "Waiting"]
-                    if st.session_state.algorithm == "SJF":
-                        queue.sort(key=lambda x: x["burst"])
-                    else:
-                        queue.sort(key=lambda x: x["priority"])
-                    next_task = queue[0] if queue else None
+            # Update Gantt log
+            if st.session_state.gantt_raw_log and st.session_state.prev_executed_pid == current_process.id:
+                last_entry = st.session_state.gantt_raw_log[-1]
+                if last_entry[0] == current_process.name:
+                    st.session_state.gantt_raw_log[-1] = (last_entry[0], last_entry[1], st.session_state.sim_time + 1)
                 else:
-                    for t in st.session_state.tasks:
-                        if t["state"] == "Waiting":
-                            next_task = t
-                            break
+                    st.session_state.gantt_raw_log.append((current_process.name, st.session_state.sim_time, st.session_state.sim_time + 1))
+            else:
+                st.session_state.gantt_raw_log.append((current_process.name, st.session_state.sim_time, st.session_state.sim_time + 1))
+            st.session_state.prev_executed_pid = current_process.id 
 
-                if next_task:
-                    st.session_state.pending_next_task_id = next_task["id"]
-                else:
-                    st.session_state.running = False
+            # 5. Handle completion or preemption (Round Robin quantum)
+            if current_process.remaining_time <= 0:
+                current_process.state = "Finished"
+                current_process.completion_time = st.session_state.sim_time + 1 
+                st.session_state.completed_processes.append(current_process)
+                st.session_state.current_process_id = None 
+                st.session_state.prev_executed_pid = None 
 
-                st.session_state.defer_next_tick = True
-                st.rerun()
+                if current_process in st.session_state.ready_queue:
+                    st.session_state.ready_queue.remove(current_process)
 
-            elif st.session_state.algorithm == "Round Robin" and st.session_state.rr_counter >= st.session_state.time_quantum:
-                current_task["state"] = "Waiting"
-                st.session_state.rr_counter = 0
 
-                all_tasks = st.session_state.tasks
-                current_idx = all_tasks.index(current_task)
-                for offset in range(1, len(all_tasks)):
-                    next_idx = (current_idx + offset) % len(all_tasks)
-                    if all_tasks[next_idx]["state"] == "Waiting":
-                        all_tasks[next_idx]["state"] = "Running"
-                        all_tasks[next_idx]["start_time"] = st.session_state.sim_time
-                        st.session_state.current_task_id = all_tasks[next_idx]["id"]
-                        break
-                else:
-                    st.session_state.running = False
-                    st.session_state.current_task_id = None
+            elif st.session_state.algorithm == "Round Robin":
+                st.session_state.rr_quantum_counter += 1
+                if st.session_state.rr_quantum_counter >= st.session_state.time_quantum:
+                    current_process.state = "Waiting"
+                    st.session_state.rr_quantum_counter = 0 
+                    st.session_state.current_process_id = None 
 
-                st.rerun()
+                    if current_process.remaining_time > 0:
+                        if current_process in st.session_state.ready_queue: 
+                            st.session_state.ready_queue.remove(current_process)
+                        st.session_state.ready_queue.append(current_process)
+                    
+                    st.session_state.prev_executed_pid = None 
+        else: 
+            st.session_state.prev_executed_pid = None 
 
-    # Resource Utilization 
+        st.session_state.ready_queue = deque([
+            p for p in st.session_state.ready_queue if p.state != "Finished"
+        ])
+
+    if st.session_state.running:
+        time.sleep(0.5) 
+        scheduler_tick()
+        st.session_state.sim_time += 1
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("<h2 style='text-align: center;'>System Metrics</h2>", unsafe_allow_html=True)
+
+    finished_processes = [p for p in st.session_state.processes if p.state == "Finished"]
+    df = None
+    cpu_util = 0.0
+
     if st.session_state.sim_time > 0:
         cpu_util = st.session_state.cpu_active_time / st.session_state.sim_time
-        if not st.session_state.running:
-            cpu_util = 0.0
-        cpu_util = min(cpu_util, 1.0)
+
+        top_col1, top_col2 = st.columns(2)
+
+        with top_col1:
+            st.subheader("System Time")
+            st.markdown(f"**Current Simulation Time:** `{st.session_state.sim_time}s`")
+            st.markdown(f"**Total CPU Active Time:** `{st.session_state.cpu_active_time}s`")
+
+        with top_col2:
+            st.subheader("Average Metrics")
+            if finished_processes:
+                summary_rows = [p.calculate_metrics() for p in finished_processes]
+                df = pd.DataFrame(summary_rows)
+
+                avg_turnaround_time = df["Turnaround Time (s)"].mean()
+                avg_waiting_time = df["Waiting Time (s)"].mean()
+                avg_response_time = df["Response Time (s)"].mean()
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Turnaround", f"{avg_turnaround_time:.2f}s")
+                with col2:
+                    st.metric("Waiting", f"{avg_waiting_time:.2f}s")
+                with col3:
+                    st.metric("Response", f"{avg_response_time:.2f}s")
+
         st.markdown(f"### 🖥️ CPU Utilization: {cpu_util * 100:.1f}%")
         st.progress(cpu_util)
 
-        mem_total = sum(t["memory"] for t in st.session_state.tasks)
-        mem_used = sum(t["memory"] for t in st.session_state.tasks if t["state"] == "Running")
-        mem_util = mem_used / mem_total if mem_total > 0 else 0
-        mem_util = min(mem_util, 1.0)
-        st.markdown(f"### 📦 Memory Utilization: {mem_util * 100:.1f}%")
-        st.progress(mem_util)
-
-    # Task Execution Summary
-    summary_rows = []
-    reference = (
-        st.session_state.get("start_reference_time") or
-        (min(t["arrival_time"] for t in st.session_state.tasks) if st.session_state.tasks else 0)
-    )
-
-    for t in st.session_state.tasks:
-        if t["state"] == "Finished":
-            arrival_time = int(t["arrival_time"] - reference)
-            start_time = int(t["start_time"] - reference) if t["start_time"] is not None else "-"
-            waiting_time = start_time - arrival_time if isinstance(start_time, int) else "-"
-            completion_time = int(t["end_time"] - reference) if t["end_time"] is not None else "-"
-            turnaround_time = completion_time - arrival_time if isinstance(completion_time, int) else "-"
-
-            summary_rows.append({
-                "PID": t["name"],
-                "Arrival Time (s)": arrival_time,
-                "Burst Time": t["burst"],
-                "Start Time (s)": start_time,
-                "Completion Time (s)": completion_time,
-                "Waiting Time (s)": waiting_time,
-                "Turnaround Time (s)": turnaround_time
-            })
-
-    if summary_rows and not st.session_state.running:
-        df = pd.DataFrame(summary_rows)
-        st.markdown("### 📊 Task Execution Summary")
-        st.dataframe(df, use_container_width=True)
-
-    if st.session_state.running:
-        time.sleep(0.5)
-        st.session_state.sim_time += 1
-        st.rerun()
+        if df is not None:
+            st.markdown("### 📊 Task Execution Summary")
+            st.dataframe(df, use_container_width=True)
 
 def cbot():
     if st.button("\U0001F519 Back to Home", use_container_width=True):
@@ -937,6 +1088,7 @@ def game_page():
                 spawn_dot()
                 st.rerun()
 
+            # This ensures the app refreshes every second
             time.sleep(1)
             st.rerun()
 
@@ -972,6 +1124,7 @@ def settings_page():
     with col2:
         st.markdown(f"**Streamlit Version:** `{st.__version__}`")
 
+        # Memory usage
         if "disk" in st.session_state:
             used_blocks = sum(1 for b in st.session_state.disk if b is not None)
             total_blocks = len(st.session_state.disk)
@@ -994,6 +1147,18 @@ def settings_page():
 def login_ui():
     if "auth_mode" not in st.session_state:
         st.session_state.auth_mode = "Login"
+
+    st.markdown("""
+        <style>
+        .stButton > button {
+            background-color: #3394ed !important;
+            color: white !important;
+            font-weight: bold !important;
+            border-radius: 8px;
+            padding: 0.5em 1em;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
     with stylable_container(
         key="login_container",
@@ -1021,13 +1186,13 @@ def login_ui():
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("🔐 Login", use_container_width=True):
+            if st.button("Login", use_container_width=True):
                 st.session_state.auth_mode = "Login"
         with col2:
-            if st.button("📝 Sign Up", use_container_width=True):
+            if st.button("Sign Up", use_container_width=True):
                 st.session_state.auth_mode = "Sign Up"
         with col3:
-            if st.button("🔄 Forgot Password", use_container_width=True):
+            if st.button("Forgot Password", use_container_width=True):
                 st.session_state.auth_mode = "Reset"
 
         if st.session_state.auth_mode in ["Login", "Sign Up"]:
