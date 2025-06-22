@@ -663,7 +663,6 @@ def tm_page():
         if st.session_state.defer_next_tick:
             st.session_state.defer_next_tick = False
             st.session_state.sim_time += 1
-            time.sleep(0.5)
             st.rerun()
 
         if st.session_state.pending_next_task_id:
