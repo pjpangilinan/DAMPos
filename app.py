@@ -2,13 +2,13 @@ import streamlit as st
 from streamlit_lottie import st_lottie
 from streamlit_extras.stylable_container import stylable_container
 from datetime import datetime
-from zoneinfo import ZoneInfo 
+from zoneinfo import ZoneInfo
 import requests
 import random
 import uuid
 import pandas as pd
 import math
-import sqlite3
+from supabase import create_client
 import bcrypt
 import re
 import time
@@ -16,49 +16,38 @@ import json
 import base64
 
 # ------------------------ DB Functions ------------------------ #
-def init_db():
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password_hash TEXT,
-            fs_json TEXT DEFAULT '{"root": {}}',
-            disk_json TEXT DEFAULT '[]'
-        )
-    ''')
-    conn.commit()
-    conn.close()
+supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+# ------------------------ Supabase User Functions ------------------------ #
+def get_user(username):
+    result = supabase.table("users").select("*").eq("username", username).execute()
+    if result.data and len(result.data) == 1:
+        return result.data[0]
+    return None
 
 def add_user(username, password):
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     empty_fs = json.dumps({"root": {}})
-    empty_disk = json.dumps([None] * DISK_SIZE)
-    c.execute("INSERT INTO users (username, password_hash, fs_json, disk_json) VALUES (?, ?, ?, ?)", 
-              (username, hashed, empty_fs, empty_disk))
-    conn.commit()
-    conn.close()
+    empty_disk = json.dumps([None] * 64) 
+    supabase.table("users").insert({
+        "username": username,
+        "password_hash": hashed,
+        "fs_json": empty_fs,
+        "disk_json": empty_disk
+    }).execute()
 
-def get_user(username):
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE username = ?", (username,))
-    user = c.fetchone()
-    conn.close()
-    return user
+def update_user_password(username, new_hash):
+    supabase.table("users").update({"password_hash": new_hash}).eq("username", username).execute()
 
 def save_fs_to_db(username):
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
     fs_json = json.dumps(st.session_state.fs)
     disk_json = json.dumps(st.session_state.disk)
-    c.execute("UPDATE users SET fs_json = ?, disk_json = ? WHERE username = ?", 
-              (fs_json, disk_json, username))
-    conn.commit()
-    conn.close()
+    supabase.table("users").update({
+        "fs_json": fs_json,
+        "disk_json": disk_json
+    }).eq("username", username).execute()
 
+# ------------------------ Utility Functions ------------------------ #
 def check_password(password, hashed):
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
@@ -130,7 +119,7 @@ def home_page():
             <h1 style="margin-bottom: 0;">👋 Welcome, <span style="color:#007BFF;">{username}</span>!</h1>
             <p style="font-size: 18px; margin: 4px 0;">Today is <strong>{date_str}</strong></p>
             <p style="font-size: 16px; color: gray;">
-            It is currently <span style="font-family: monospace; background-color: #eee; padding: 2px 4px; border-radius: 4px;">{time_str}</span>
+            It is currently <span style="font-family: monospace; background-color: #eee; padding: 2px 4px; border-radius: 4px;">{time_str} GMT+8</span>
             </p>
         </div>
         <hr style="margin: 1.5rem 0;">
@@ -195,9 +184,9 @@ def file_system_page():
 
     if "disk" not in st.session_state:
         user_data = get_user(st.session_state.username) if "username" in st.session_state else None
-        if user_data and len(user_data) > 3 and user_data[3]:
+        if user_data and "disk_json" in user_data and user_data["disk_json"]:
             try:
-                st.session_state.disk = json.loads(user_data[3])
+                st.session_state.disk = json.loads(user_data["disk_json"])
             except:
                 st.session_state.disk = [None] * DISK_SIZE
         else:
@@ -209,8 +198,8 @@ def file_system_page():
         st.session_state.allocation_strategy = "First-Fit"
     if "fs" not in st.session_state:
         user_data = get_user(st.session_state.username) if "username" in st.session_state else None
-        if user_data and len(user_data) > 2 and user_data[2]:
-            st.session_state.fs = json.loads(user_data[2])
+        if user_data and "fs_json" in user_data and user_data["fs_json"]:
+            st.session_state.fs = json.loads(user_data["fs_json"])
         else:
             st.session_state.fs = {"root": {}}
 
@@ -1033,7 +1022,6 @@ def login_ui():
             </div>
         """, unsafe_allow_html=True)
 
-        # Navigation buttons
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("🔐 Login", use_container_width=True):
@@ -1045,7 +1033,6 @@ def login_ui():
             if st.button("🔄 Forgot Password", use_container_width=True):
                 st.session_state.auth_mode = "Reset"
 
-        # AUTH FORMS
         if st.session_state.auth_mode in ["Login", "Sign Up"]:
             with st.form("auth_form", clear_on_submit=False):
                 username = st.text_input("Username", placeholder="Enter your username")
@@ -1068,7 +1055,7 @@ def login_ui():
                         user = get_user(username)
                         if not user:
                             st.error("❌ Username not found.")
-                        elif not check_password(password, user[1]):
+                        elif not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
                             st.error("🔐 Incorrect password.")
                         else:
                             st.success(f"🎉 Welcome, {username}!")
@@ -1096,19 +1083,14 @@ def login_ui():
                     elif not is_strong_password(new_password):
                         st.warning("⚠️ Password must include uppercase, lowercase, number, symbol, and be 8+ characters.")
                     else:
-                        conn = sqlite3.connect("users.db")
-                        c = conn.cursor()
                         new_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
-                        c.execute("UPDATE users SET password_hash = ? WHERE username = ?", (new_hash, username))
-                        conn.commit()
-                        conn.close()
+                        update_user_password(username, new_hash)
                         st.success("✅ Password updated! You can now log in.")
                         st.session_state.auth_mode = "Login"
 
 if __name__ == "__main__":
     st.set_page_config(page_title="DAMPos", page_icon="icon.png", initial_sidebar_state="collapsed")
     set_styles()
-    init_db()
 
     if "loaded" not in st.session_state:
         startup_screen()
