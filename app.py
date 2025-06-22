@@ -3,7 +3,6 @@ from streamlit_lottie import st_lottie
 from streamlit_extras.stylable_container import stylable_container
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import socket
 import requests
 import random
 import uuid
@@ -972,8 +971,6 @@ def settings_page():
 
     with col2:
         st.markdown(f"**Streamlit Version:** `{st.__version__}`")
-        device_name = socket.gethostname()
-        st.markdown(f"**Device Name:** `{device_name}`")
 
         if "disk" in st.session_state:
             used_blocks = sum(1 for b in st.session_state.disk if b is not None)
