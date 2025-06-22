@@ -1221,7 +1221,6 @@ def login_ui():
                             st.error("🔐 Incorrect password.")
                         else:
                             st.success(f"🎉 Welcome, {username}!")
-                            time.sleep(0.5)
                             st.session_state.authenticated = True
                             st.session_state.username = username
                             st.session_state.page = "home"
