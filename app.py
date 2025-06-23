@@ -236,7 +236,11 @@ def file_system_page():
         user_data = get_user(st.session_state.username) if "username" in st.session_state else None
         if user_data and "disk_json" in user_data and user_data["disk_json"]:
             try:
-                st.session_state.disk = decompress_json(user_data["disk_json"]) 
+                loaded_disk = decompress_json(user_data["disk_json"])
+                if isinstance(loaded_disk, list) and len(loaded_disk) == DISK_SIZE:
+                    st.session_state.disk = loaded_disk
+                else:
+                    st.session_state.disk = [None] * DISK_SIZE
             except:
                 st.session_state.disk = [None] * DISK_SIZE
         else:
