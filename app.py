@@ -1123,8 +1123,7 @@ def settings_page():
             <strong>As part of their final requirement for CPEN95 - Operating Systems</strong>, the students were tasked with creating a mini operating system called <strong>DAMPos</strong> 
             (<em>Dizon, Alimpolos, Mojica, and Pangilinan’s Operating System</em>) that simulates core functionalities of real-world OS designs.<br><br>
             To accomplish this, the team used <strong>Python</strong> as the primary programming language, integrating various modules to build system-like components. 
-            For the graphical user interface and to support web deployment, they utilized a Python framework called <strong>Streamlit</strong>, 
-            which allowed for rapid prototyping and an interactive frontend.
+            For the graphical user interface and to support web deployment, they utilized a Python framework called <strong>Streamlit</strong>.
             </div>
         """, unsafe_allow_html=True)
 
