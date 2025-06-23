@@ -1248,8 +1248,8 @@ def login_ui():
 
         elif st.session_state.auth_mode == "Reset":
             with st.form("reset_form", clear_on_submit=False):
-                st.markdown("### 🔄 Reset Password")
                 username = st.text_input("Username for Reset")
+                original_password = st.text_input("Original Password", type="password")
                 new_password = st.text_input("New Password", type="password")
                 confirm_password = st.text_input("Confirm Password", type="password")
                 reset_submit = st.form_submit_button("Reset Password", use_container_width=True)
@@ -1258,6 +1258,8 @@ def login_ui():
                     user = get_user(username)
                     if not user:
                         st.error("❌ Username not found.")
+                    elif not bcrypt.checkpw(original_password.encode(), user["password_hash"].encode()):
+                        st.error("❌ Original password is incorrect.")
                     elif new_password != confirm_password:
                         st.error("❌ Passwords do not match.")
                     elif not is_strong_password(new_password):
