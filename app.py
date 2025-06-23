@@ -1113,8 +1113,34 @@ def settings_page():
     if st.button("🔙 Back to Home", use_container_width=True):
         st.session_state.page = "home"
         st.rerun()
-
+        
     st.markdown("### 🖥️ System Information")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("""
+            <div style="text-align: justify; font-size: 0.95rem;">
+            <strong>As part of their final requirement for CPEN95 - Operating Systems</strong>, the students were tasked with creating a mini operating system called <strong>DAMPos</strong> 
+            (<em>Dizon, Alimpolos, Mojica, and Pangilinan’s Operating System</em>) that simulates core functionalities of real-world OS designs.<br><br>
+            To accomplish this, the team used <strong>Python</strong> as the primary programming language, integrating various modules to build system-like components. 
+            For the graphical user interface and to support web deployment, they utilized a Python framework called <strong>Streamlit</strong>, 
+            which allowed for rapid prototyping and an interactive frontend.
+            </div>
+        """, unsafe_allow_html=True)
+
+    with c2:
+        st.markdown("""
+            <div style="text-align: justify; font-size: 0.95rem;">
+            <strong>Key Features Implemented:</strong>
+            <ul style="padding-left: 1.2rem;">
+                <li><strong>User Authentication System:</strong> Basic login simulation using username and password validation.</li>
+                <li><strong>File Management System:</strong> Simulates file creation, deletion, and listing using <em>contiguous allocation</em> with a simple directory structure.</li>
+                <li><strong>Memory Management:</strong> Models fixed-size memory blocks and supports basic allocation strategies like <em>First-Fit</em> and <em>Best-Fit</em>.</li>
+                <li><strong>Process Scheduling:</strong> Emulates classic algorithms including <em>FCFS, SJF, Priority Scheduling</em>, and <em>Round Robin</em>, with customizable parameters such as arrival time, burst time, priority, and time quantum.</li>
+            </ul>
+            </div>
+        """, unsafe_allow_html=True)
+        
     col1, col2 = st.columns(2)
 
     if "disk" not in st.session_state:
