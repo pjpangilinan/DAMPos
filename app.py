@@ -4,6 +4,8 @@ from streamlit_extras.stylable_container import stylable_container
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from collections import deque
+from platform import python_version
+import zlib
 import requests
 import random
 import uuid
@@ -80,12 +82,19 @@ def add_user(username, password):
 def update_user_password(username, new_hash):
     supabase.table("users").update({"password_hash": new_hash}).eq("username", username).execute()
 
+def compress_json(obj):
+    return base64.b64encode(zlib.compress(json.dumps(obj).encode())).decode()
+
+def decompress_json(s):
+    return json.loads(zlib.decompress(base64.b64decode(s.encode())).decode())
+
 def save_fs_to_db(username):
-    fs_json = json.dumps(st.session_state.fs)
-    disk_json = json.dumps(st.session_state.disk)
+    fs_compressed = compress_json(st.session_state.fs)
+    disk_compressed = compress_json(st.session_state.disk)
+
     supabase.table("users").update({
-        "fs_json": fs_json,
-        "disk_json": disk_json
+        "fs_json": fs_compressed,
+        "disk_json": disk_compressed
     }).eq("username", username).execute()
 
 # ------------------------ Utility Functions ------------------------ #
@@ -137,7 +146,7 @@ def startup_screen():
     lottie_animation = load_lottie_file("startup.json")
     st_lottie(lottie_animation, height=400, width=670, key="startup")
     st.markdown("<h3 style='text-align: center;'>Starting DAMPos...</h3>", unsafe_allow_html=True)
-    time.sleep(6.3)
+    time.sleep(0.5)
 
 DISK_SIZE = 64
 BLOCK_SIZE = 1 * 1024 * 1024  # 1 MB per block
@@ -178,7 +187,7 @@ def home_page():
                     justify-content: center;
                     margin: 0.5rem auto;
                     height: 8rem !important;
-                    width: 8rem !important;
+                    width: 100% !important;
                     padding: 0.5rem !important;
                     border-radius: 1.2rem !important;
                     border: 2px solid #e0e0e0 !important;
@@ -227,7 +236,7 @@ def file_system_page():
         user_data = get_user(st.session_state.username) if "username" in st.session_state else None
         if user_data and "disk_json" in user_data and user_data["disk_json"]:
             try:
-                st.session_state.disk = json.loads(user_data["disk_json"])
+                st.session_state.disk = decompress_json(user_data["disk_json"]) 
             except:
                 st.session_state.disk = [None] * DISK_SIZE
         else:
@@ -240,9 +249,13 @@ def file_system_page():
     if "fs" not in st.session_state:
         user_data = get_user(st.session_state.username) if "username" in st.session_state else None
         if user_data and "fs_json" in user_data and user_data["fs_json"]:
-            st.session_state.fs = json.loads(user_data["fs_json"])
+            try:
+                st.session_state.fs = decompress_json(user_data["fs_json"]) 
+            except:
+                st.session_state.fs = {"root": {}}
         else:
             st.session_state.fs = {"root": {}}
+
 
     def get_current_dir():
         ref = st.session_state.fs
@@ -1104,7 +1117,7 @@ def settings_page():
         user_data = get_user(st.session_state.username) if "username" in st.session_state else None
         if user_data and "disk_json" in user_data and user_data["disk_json"]:
             try:
-                st.session_state.disk = json.loads(user_data["disk_json"])
+                st.session_state.disk = decompress_json(user_data["disk_json"])  
             except:
                 st.session_state.disk = [None] * DISK_SIZE
         else:
@@ -1122,6 +1135,7 @@ def settings_page():
         st.markdown(f"**Password:** `{pw_display}`")
 
     with col2:
+        st.markdown(f"**Python Version:** `{python_version()}`")
         st.markdown(f"**Streamlit Version:** `{st.__version__}`")
 
         # Memory usage
@@ -1221,7 +1235,7 @@ def login_ui():
                             st.error("🔐 Incorrect password.")
                         else:
                             st.success(f"🎉 Welcome, {username}!")
-                            time.sleep(1.5)
+                            time.sleep(0.5)
                             st.session_state.authenticated = True
                             st.session_state.username = username
                             st.session_state.page = "home"
