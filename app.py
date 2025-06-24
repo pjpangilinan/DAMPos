@@ -146,7 +146,7 @@ def startup_screen():
     lottie_animation = load_lottie_file("startup.json")
     st_lottie(lottie_animation, height=400, width=670, key="startup")
     st.markdown("<h3 style='text-align: center;'>Starting DAMPos...</h3>", unsafe_allow_html=True)
-    time.sleep(0.5)
+    time.sleep(6)
 
 DISK_SIZE = 64
 BLOCK_SIZE = 1 * 1024 * 1024  # 1 MB per block
@@ -246,6 +246,7 @@ def file_system_page():
         else:
             st.session_state.disk = [None] * DISK_SIZE
 
+
     if "current_path" not in st.session_state:
         st.session_state.current_path = ["root"]
     if "allocation_strategy" not in st.session_state:
@@ -259,7 +260,6 @@ def file_system_page():
                 st.session_state.fs = {"root": {}}
         else:
             st.session_state.fs = {"root": {}}
-
 
     def get_current_dir():
         ref = st.session_state.fs
@@ -321,12 +321,15 @@ def file_system_page():
         results = []
         for key, value in directory.items():
             current_path = f"{path}/{key}"
-            if isinstance(value, dict):
-                if "content" in value:
-                    if name_query.lower() in key.lower():
-                        results.append((key, current_path, value))
-                else:
-                    results.extend(search_files(name_query, value, current_path))
+            try:
+                if isinstance(value, dict):
+                    if "content" in value:
+                        if name_query.lower() in key.lower():
+                            results.append((key, current_path, value))
+                    else:
+                        results.extend(search_files(name_query, value, current_path))
+            except Exception as e:
+                st.warning(f"Skipped a file or folder due to an error: {e}")
         return results
 
     def render_disk():
@@ -570,7 +573,7 @@ def file_system_page():
         results = search_files(query)
         if results:
             st.markdown("#### 📄 Search Results")
-            for name, path, data in results:
+            for idx, (name, path, data) in enumerate(results): 
                 st.write(f"**{name}** in `{path}` ({round(data['size'] / (1024 * 1024), 2)} MB)")
                 if data['type'] == "text":
                     st.code(data["content"])
@@ -585,15 +588,15 @@ def file_system_page():
                     if mime.startswith("image/"):
                         st.image(content)
                     elif mime == "application/pdf":
-                        st.download_button("Download PDF", content, file_name=name, mime=mime)
+                        st.download_button("Download PDF", content, file_name=name, mime=mime, key=f"dl_pdf_{idx}", use_container_width=True)
                     else:
-                        st.download_button("Download File", content, file_name=name, mime=mime)
+                        st.download_button("Download File", content, file_name=name, mime=mime, key=f"dl_file_{idx}", use_container_width=True)
                         st.info("No preview available for this file type.")
         else:
             st.warning("No files found.")
 
     render_disk()
-        
+
     curr_dir = get_current_dir()
     render_directory(curr_dir)
     create_folder_or_file(curr_dir)
@@ -1113,7 +1116,7 @@ def settings_page():
     if st.button("🔙 Back to Home", use_container_width=True):
         st.session_state.page = "home"
         st.rerun()
-        
+
     st.markdown("### 🖥️ System Information")
 
     c1, c2 = st.columns(2)
@@ -1123,7 +1126,8 @@ def settings_page():
             <strong>As part of their final requirement for CPEN95 - Operating Systems</strong>, the students were tasked with creating a mini operating system called <strong>DAMPos</strong> 
             (<em>Dizon, Alimpolos, Mojica, and Pangilinan’s Operating System</em>) that simulates core functionalities of real-world OS designs.<br><br>
             To accomplish this, the team used <strong>Python</strong> as the primary programming language, integrating various modules to build system-like components. 
-            For the graphical user interface and to support web deployment, they utilized a Python framework called <strong>Streamlit</strong>.
+            For the graphical user interface and to support web deployment, they utilized a Python framework called <strong>Streamlit</strong>, 
+            which allowed for rapid prototyping and an interactive frontend.
             </div>
         """, unsafe_allow_html=True)
 
@@ -1139,7 +1143,7 @@ def settings_page():
             </ul>
             </div>
         """, unsafe_allow_html=True)
-        
+
     col1, col2 = st.columns(2)
 
     if "disk" not in st.session_state:
@@ -1294,6 +1298,7 @@ def login_ui():
                         update_user_password(username, new_hash)
                         st.success("✅ Password updated! You can now log in.")
                         st.session_state.auth_mode = "Login"
+
 
 if __name__ == "__main__":
     st.set_page_config(page_title="DAMPos", page_icon="icon.png", initial_sidebar_state="collapsed")
